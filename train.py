@@ -10,8 +10,8 @@ Pipeline:
 - Track RMSE / MAE / R2 each epoch
 - Save the best model checkpoint and a loss-curve plot
 """
-
 import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import random
 
 import numpy as np

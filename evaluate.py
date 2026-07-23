@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor

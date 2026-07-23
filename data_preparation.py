@@ -117,7 +117,9 @@ def smiles_to_graph(smiles, label):
     # Target value
     y = torch.tensor([label], dtype=torch.float)
 
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+    data.smiles = smiles
+    return data
 
 # ── Main pipeline ───────────────────────────────────────────────────────────
 def main():
