@@ -1,0 +1,14 @@
+{
+  "best_val_loss": 0.9288877646128336,
+  "best_params": {
+    "hidden_channels": 64,
+    "num_heads": 2,
+    "dropout": 0.02904180608409973,
+    "learning_rate": 0.005399484409787433,
+    "weight_decay": 6.358358856676247e-05,
+    "batch_size": 64
+  },
+  "n_trials_completed": 2,
+  "n_trials_planned": 8,
+  "note": "Partial run: stopped after 2 trials (out of 8 planned) due to CPU time constraints in this environment. optimise_hyperparameters.py is configured for a full sweep (N_TRIALS, MAX_EPOCHS_PER_TRIAL, PATIENCE at the top of the file) and can be re-run as-is with more time or on a GPU."
+}
