@@ -13,6 +13,10 @@ Companion project to the MDM2-QSAR pipeline — compares classical ML (Random Fo
 
 Random Forest outperforms GAT on this dataset — consistent with published literature showing classical ML often outperforms deep learning on small molecular datasets (<10k compounds).
 
+![GAT vs Random Forest predicted vs actual](plots/gat_vs_rf_comparison.png)
+
+![Model comparison bar charts](plots/model_comparison_bars.png)
+
 ## Attention Visualisation
 
 The GAT model produces atom-level attention weights showing which atoms drive the potency prediction. Red atoms received high attention, blue atoms low attention — effectively highlighting the model's learned pharmacophore.
