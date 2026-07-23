@@ -101,7 +101,7 @@ MDM2 bioactivity data from ChEMBL (4,146 compounds, IC50 values converted to pIC
 conda create -n qsar python=3.10
 conda activate qsar
 conda install -c conda-forge rdkit cairo
-pip install torch torch-geometric chembl-webresource-client scikit-learn pandas numpy matplotlib scipy cairosvg
+pip install torch torch-geometric chembl-webresource-client scikit-learn pandas numpy matplotlib scipy cairosvg optuna
 ```
 
 `cairo` (conda) + `cairosvg` (pip) are required for `visualise.py` to render actual molecule structures rather than placeholder text.
