@@ -1,17 +1,19 @@
 """
 virtual_screen.py — MDM2 GAT Virtual Screening
 ================================================
-Downloads a subset of ZINC drug-like compounds, converts them to molecular
-graphs, runs them through the trained GAT model, ranks by predicted pIC50,
-and visualises attention maps for the top hits.
+Downloads a subset of ZINC compounds sized/lipophilicity-matched to the MDM2
+training set, converts them to molecular graphs, runs them through the
+trained GAT model, ranks by predicted pIC50, and visualises attention maps
+for the top in-domain hits.
 
 Pipeline:
-1. Download ~50k SMILES from ZINC15
-2. Convert to molecular graphs
+1. Download ~50k SMILES from ZINC15 (tranches matched to training MW/LogP)
+2. Convert to molecular graphs, filtering to the training-like property window
 3. Predict pIC50 with trained GAT
-4. Filter by Lipinski's Rule of Five
-5. Rank and export top candidates
-6. Visualise attention maps for top 6 hits
+4. Score applicability domain (similarity to training compounds) and flag hits
+   too dissimilar from anything the model was trained on to be trustworthy
+5. Rank and export top in-domain candidates
+6. Visualise attention maps for top 6 in-domain hits
 """
 
 import torch
@@ -24,7 +26,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from matplotlib.colors import Normalize
 from rdkit import Chem
-from rdkit.Chem import Descriptors, rdMolDescriptors
+from rdkit.Chem import Descriptors
 from rdkit.Chem.Draw import rdMolDraw2D
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
@@ -40,6 +42,7 @@ OUTPUT_DIR   = "virtual_screening"
 N_COMPOUNDS  = 50000   # compounds to screen
 TOP_N        = 50      # top candidates to save
 TOP_VISUAL   = 6       # top compounds to visualise with attention maps
+MIN_TRAIN_SIMILARITY = 0.35  # applicability-domain cutoff (Tanimoto, Morgan r=2)
 BATCH_SIZE   = 256
 IMG_SIZE     = (600, 500)
 
@@ -86,10 +89,15 @@ def download_zinc_smiles(n_compounds=50000):
     # ZINC15 flat-file mirror (files.docking.org) — serves tranche .smi files
     # directly, unlike the interactive zinc15.docking.org site which now sits
     # behind a bot-verification challenge page.
-    # Tranche codes are <MW letter><LogP letter>, each covering a drug-like
-    # bin within roughly MW 250-500 / LogP 0-4.
-    mw_letters   = "CDEFGHIJK"
-    logp_letters = "CDEF"
+    # Tranche codes are <MW letter><LogP letter> (A=smallest/least lipophilic,
+    # K=largest/most lipophilic). The MDM2 training set (data/mdm2_graphs.pt)
+    # has median MW ~558 (p10-p90: 482-657) and median LogP ~5.7 (p10-p90:
+    # 4.3-7.0) — these are large, lipophilic PPI-inhibitor-like compounds,
+    # not classic Lipinski-compliant oral drugs. Empirically: HH~(410,3.8),
+    # II~(437,4.3), JJ~(484,4.7), KK~(538,5.9) — bins H-K are the closest
+    # available match to the training distribution.
+    mw_letters   = "HIJK"
+    logp_letters = "GHIJK"
     zinc_urls = [
         f"https://files.docking.org/2D/{mw}{logp}/{mw}{logp}AA.smi"
         for mw in mw_letters
@@ -173,41 +181,44 @@ def get_fallback_compounds():
     ]
     return [{"smiles": s, "zinc_id": f"FALLBACK_{i:04d}"} for i, s in enumerate(smiles_list)]
 
-# ── Lipinski's Rule of Five filter ───────────────────────────────────────────
-def passes_lipinski(smiles):
-    """
-    Filter compounds by Lipinski's Rule of Five.
-    Oral bioavailability predictor — standard filter in virtual screening.
-    MW ≤ 500, LogP ≤ 5, HBD ≤ 5, HBA ≤ 10
-    """
+# ── Property filter ───────────────────────────────────────────────────────────
+# Classic Lipinski Ro5 (MW<=500, LogP<=5) is the wrong filter for this model:
+# the MDM2 training set is dominated by large, lipophilic PPI-inhibitor-like
+# compounds (p10-p90 MW 482-657, LogP 4.3-7.0) that mostly *violate* Ro5.
+# Screening Ro5-compliant candidates pushes the model into chemical space it
+# never saw, producing unreliable, spuriously high extrapolated predictions.
+# These bounds instead track the training distribution's ~p5-p95 range.
+MW_MIN, MW_MAX     = 400.0, 700.0
+LOGP_MIN, LOGP_MAX = 3.0, 7.5
+
+def passes_property_filter(smiles):
+    """Keep only compounds whose MW/LogP resemble the MDM2 training set."""
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return False
 
     mw   = Descriptors.MolWt(mol)
     logp = Descriptors.MolLogP(mol)
-    hbd  = rdMolDescriptors.CalcNumHBD(mol)
-    hba  = rdMolDescriptors.CalcNumHBA(mol)
 
-    return mw <= 500 and logp <= 5 and hbd <= 5 and hba <= 10
+    return MW_MIN <= mw <= MW_MAX and LOGP_MIN <= logp <= LOGP_MAX
 
 # ── Convert ZINC SMILES to graphs ─────────────────────────────────────────────
 def prepare_screening_graphs(df):
-    """Convert SMILES to PyG graphs, filtering invalid and non-Lipinski."""
+    """Convert SMILES to PyG graphs, filtering invalid and out-of-range compounds."""
     print(f"Converting {len(df)} SMILES to molecular graphs...")
-    print("Applying Lipinski Rule of Five filter...")
+    print(f"Applying property filter (MW {MW_MIN}-{MW_MAX}, LogP {LOGP_MIN}-{LOGP_MAX})...")
 
-    graphs    = []
-    failed    = 0
-    lipinski  = 0
-    zinc_ids  = []
+    graphs      = []
+    failed      = 0
+    off_profile = 0
+    zinc_ids    = []
 
     for _, row in df.iterrows():
         smiles   = str(row["smiles"]).strip()
         zinc_id  = str(row["zinc_id"]).strip()
 
-        if not passes_lipinski(smiles):
-            lipinski += 1
+        if not passes_property_filter(smiles):
+            off_profile += 1
             continue
 
         graph = smiles_to_graph(smiles, label=0.0)  # dummy label for screening
@@ -218,10 +229,40 @@ def prepare_screening_graphs(df):
             failed += 1
 
     print(f"  Total input:          {len(df)}")
-    print(f"  Failed Lipinski:      {lipinski}")
+    print(f"  Failed property filter: {off_profile}")
     print(f"  Failed graph build:   {failed}")
     print(f"  Screened:             {len(graphs)}")
     return graphs, zinc_ids
+
+# ── Applicability domain ──────────────────────────────────────────────────────
+def compute_train_fingerprints():
+    """Morgan fingerprints for the MDM2 training set, used as an applicability-
+    domain reference: predictions on candidates far (in fingerprint space) from
+    every training compound are extrapolations and should be treated with
+    suspicion regardless of how confident the model looks."""
+    from rdkit.Chem import AllChem
+
+    graphs = torch.load("data/mdm2_graphs.pt", weights_only=False)
+    fps = []
+    for g in graphs:
+        if not hasattr(g, "smiles"):
+            continue
+        mol = Chem.MolFromSmiles(g.smiles)
+        if mol is not None:
+            fps.append(AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048))
+    return fps
+
+def max_train_similarity(smiles, train_fps):
+    """Highest Tanimoto similarity between this compound and any training compound."""
+    from rdkit.Chem import AllChem
+    from rdkit import DataStructs
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return 0.0
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+    sims = DataStructs.BulkTanimotoSimilarity(fp, train_fps)
+    return max(sims) if sims else 0.0
 
 # ── Run virtual screen ────────────────────────────────────────────────────────
 def run_screening(model, graphs, zinc_ids):
@@ -243,12 +284,21 @@ def run_screening(model, graphs, zinc_ids):
         "predicted_pIC50": all_preds
     })
 
+    print("Scoring applicability domain (similarity to training compounds)...")
+    train_fps = compute_train_fingerprints()
+    results["max_train_similarity"] = [
+        max_train_similarity(s, train_fps) for s in results["smiles"]
+    ]
+    results["in_domain"] = results["max_train_similarity"] >= MIN_TRAIN_SIMILARITY
+
     results = results.sort_values("predicted_pIC50", ascending=False).reset_index(drop=True)
     results["rank"] = results.index + 1
 
+    n_in_domain = int(results["in_domain"].sum())
     print(f"Screening complete.")
     print(f"Top predicted pIC50: {results['predicted_pIC50'].iloc[0]:.3f}")
     print(f"Mean predicted pIC50: {results['predicted_pIC50'].mean():.3f}")
+    print(f"In applicability domain (similarity >= {MIN_TRAIN_SIMILARITY}): {n_in_domain}/{len(results)}")
 
     return results
 
@@ -339,7 +389,7 @@ def visualise_top_hits(model, results, graphs, top_n=6):
     # Build smiles → graph lookup
     graph_lookup = {g.smiles: g for g in graphs}
 
-    top_results  = results.head(top_n)
+    top_results  = results[results["in_domain"]].head(top_n)
     cols         = 3
     rows         = (top_n + cols - 1) // cols
 
@@ -403,18 +453,29 @@ def visualise_top_hits(model, results, graphs, top_n=6):
 
 # ── Save results ──────────────────────────────────────────────────────────────
 def save_results(results, top_n=50):
-    """Save full results and top hits to CSV."""
+    """Save full results (all candidates) and top hits (in-domain only) to CSV.
+
+    Ranking purely by predicted_pIC50 lets the model's own out-of-domain
+    extrapolation artifacts dominate the top of the list. top_hits.csv is
+    restricted to compounds similar enough to a real training compound
+    (in_domain) that the prediction is worth trusting; screening_results_full.csv
+    keeps everything, uncensored, for transparency.
+    """
     full_path = os.path.join(OUTPUT_DIR, "screening_results_full.csv")
     top_path  = os.path.join(OUTPUT_DIR, "top_hits.csv")
 
     results.to_csv(full_path, index=False)
-    results.head(top_n).to_csv(top_path, index=False)
+
+    in_domain_results = results[results["in_domain"]]
+    top_hits = in_domain_results.head(top_n)
+    top_hits.to_csv(top_path, index=False)
 
     print(f"\nResults saved:")
     print(f"  Full results: {full_path}")
-    print(f"  Top {top_n} hits: {top_path}")
-    print(f"\nTop 10 predicted MDM2 inhibitors:")
-    print(results[["rank", "zinc_id", "predicted_pIC50", "smiles"]].head(10).to_string(index=False))
+    print(f"  Top {top_n} in-domain hits: {top_path}")
+    print(f"\nTop 10 predicted MDM2 inhibitors (in applicability domain):")
+    print(top_hits[["rank", "zinc_id", "predicted_pIC50", "max_train_similarity", "smiles"]]
+          .head(10).to_string(index=False))
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
@@ -428,7 +489,7 @@ def main():
     # 2. Download ZINC compounds
     df = download_zinc_smiles(n_compounds=N_COMPOUNDS)
 
-    # 3. Convert to graphs + Lipinski filter
+    # 3. Convert to graphs + property filter
     graphs, zinc_ids = prepare_screening_graphs(df)
 
     if len(graphs) == 0:
@@ -448,8 +509,8 @@ def main():
     print("Virtual screening complete.")
     print(f"Outputs saved to: {OUTPUT_DIR}/")
     print("  screening_results_full.csv — all screened compounds ranked")
-    print("  top_hits.csv               — top 50 candidates")
-    print("  top_hits_attention.png     — attention maps for top 6")
+    print("  top_hits.csv               — top 50 in-domain candidates")
+    print("  top_hits_attention.png     — attention maps for top 6 in-domain hits")
     print("=" * 60)
 
 if __name__ == "__main__":
