@@ -72,36 +72,6 @@ In practice this turns "predicted pIC50 8.2" into "predicted pIC50 8.2 ± 0.6" �
 
 To reproduce: `python predict_with_uncertainty.py`
 
-## Virtual Screening: Applying the Model to ZINC15
-
-`virtual_screen.py` takes the trained GAT out of the evaluation set and points it at ~50,000 real, purchasable ZINC15 compounds — download, filter, predict, rank, and visualise attention for the top hits. Getting this right took a wrong turn worth documenting, because the failure is more instructive than the final numbers.
-
-**First attempt — filtered by Lipinski's Rule of Five.** MW ≤ 500, LogP ≤ 5 is the standard oral-drug filter, so it seemed like the obvious choice for selecting which ZINC tranches to download. The screen ran cleanly and produced a top-10 list — but the compounds looked wrong: small, polar dicarboxylic-acid and xanthine-like fragments (MW ~280, LogP ~0.5–0.9), with predicted pIC50 suspiciously clustered at 9.2–9.6, well above anything reasonable.
-
-**Diagnosis.** Comparing those candidates against the MDM2 training set's *own* property distribution exposed the mismatch: the training compounds have a median MW of ~558 (p10–p90: 482–657) and median LogP of ~5.7 (p10–p90: 4.3–7.0). Real MDM2 inhibitors are large, lipophilic protein–protein-interaction inhibitors (Nutlin/spirooxindole-class chemistry) built to fill a big hydrophobic pocket — they routinely *violate* Ro5. The Lipinski filter was feeding the model tiny, polar compounds from a region of chemical space it had essentially never seen in training, and the model's overconfident, oddly uniform predictions there were extrapolation artifacts, not real signal.
-
-**The fix — three changes:**
-1. **Retargeted the ZINC15 tranche selection** to the MW/LogP bins that actually match the training distribution (tranche letters `H`–`K`) instead of the classic drug-like bins (`C`–`F`).
-2. **Replaced the Ro5 filter** with property bounds tracking the training set's own ~p5–p95 range (MW 400–700, LogP 3.0–7.5).
-3. **Added an applicability-domain check.** Every candidate's Morgan fingerprint (radius 2) is compared via Tanimoto similarity against every training compound; only candidates with a best-match similarity ≥ 0.35 are reported as trustworthy (556 of 50,000 candidates, ~1.1%). The full ranked list of all 50,000 is still saved for transparency (`screening_results_full.csv`) — only `top_hits.csv` and the attention visualisation are restricted to the in-domain subset.
-
-**Result.** Predicted pIC50 for the top hits dropped from the implausible 9.2–9.6 cluster to a believable 7.45–8.14 range (training mean: 7.68), and the chemistry became genuinely MDM2-like: halogenated, multi-ring, amide-linked scaffolds instead of small polar artifacts.
-
-| Rank | ZINC ID | Predicted pIC50 | Train similarity |
-|------|---------|------------------|-------------------|
-| 244 | 12386673 | 8.14 | 0.35 |
-| 420 | 1430541 | 8.03 | 0.41 |
-| 1280 | 2809821 | 7.77 | 0.35 |
-| 1471 | 72430240 | 7.74 | 0.37 |
-| 1557 | 16672213 | 7.72 | 0.36 |
-| 1558 | 16672215 | 7.72 | 0.36 |
-
-Ranks 5 and 6 (ZINC 16672213 and 16672215) are the same 2D scaffold — `COc1cc2c(cc1OC)[C@H](c1cccc(Cl)c1)N(C1CCN(C)CC1)CC2` vs. the `[C@@H]` enantiomer — differing only at one stereocentre, and they get *identical* predicted pIC50 (7.7233) and similarity scores. That's a real limitation as much as a reassurance: the current atom/bond featurisation (`data_preparation.py`) doesn't encode chirality, so the two enantiomers are literally the same input graph to the model — identical outputs are guaranteed, not learned. The useful takeaway is the negative control it provides: the pipeline is deterministic and doesn't introduce noise between near-identical inputs, but distinguishing stereoisomers would need chirality-aware node/edge features, which this model doesn't have.
-
-![Virtual screening top hits attention](virtual_screening/top_hits_attention.png)
-
-To reproduce: `python virtual_screen.py` (outputs land in `virtual_screening/`)
-
 ## Repo structure
 
 ```
@@ -116,11 +86,9 @@ collect_brd4_data.py        fetches BRD4 bioactivity data from ChEMBL
 brd4_data_preparation.py    BRD4: SMILES -> molecular graphs (data/brd4_graphs.pt)
 train_brd4.py               BRD4 training loop, saves checkpoints/brd4_best_model.pt
 evaluate_brd4_checkpoint.py standalone BRD4 test-set evaluation from a checkpoint
-virtual_screen.py           ZINC15 virtual screen + applicability-domain filtering
 checkpoints/                saved model weights + best_hyperparameters.json
 data/                       processed graph datasets (MDM2 + BRD4)
 visualisations/             generated attention maps
-virtual_screening/          ZINC download, full/top-hit rankings, attention maps
 ```
 
 ## Dataset
